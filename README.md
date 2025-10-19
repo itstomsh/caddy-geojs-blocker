@@ -1,6 +1,7 @@
 # Caddy GeoJS Blocker Module
+![Go CI](https://github.com/tomsh-hr/caddy-geojs-blocker/actions/workflows/go.yml/badge.svg)
 
-A lightweight **Caddy v2 HTTP handler module** for **geoblocking** or **geowhitelisting** requests based on client IP country codes, using the free [GeoJS API](https://get.geojs.io/v1/ip/country/{ip}).  
+A lightweight **Caddy v2 HTTP handler module** for **geoblocking** or **geowhitelisting** requests based on client IP country codes, using the free [GeoJS API](https://www.geojs.io/).  
 Supports both **allowlisting** (default allow, block others) and **blocklisting** (default allow, block specific).  
 Includes per-instance caching, concurrency-safe stats, and an optional debug endpoint for monitoring.
 
@@ -276,7 +277,7 @@ The module automatically converts them to uppercase and ignores invalid entries.
 
 ## 📜 License
 
-MIT License — see `LICENSE`.
+Licensed under the [MIT License](./LICENSE).
 
 Contributions welcome!  
 Built with ❤️ for [Caddy](https://caddyserver.com).
