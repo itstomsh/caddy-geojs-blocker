@@ -1,0 +1,24 @@
+# Go build outputs
+/bin/
+/build/
+/dist/
+/tmp/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go test binaries
+*.test
+
+# Caddy binary (if you build one)
+caddy
+
+# IDE / editor files
+.vscode/
+.idea/
+.DS_Store
+
+# Coverage and logs
+coverage.out
+*.log
