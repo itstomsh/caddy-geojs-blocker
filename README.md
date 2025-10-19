@@ -22,22 +22,30 @@ Includes per-instance caching, concurrency-safe stats, and an optional debug end
 
 ### Build Caddy with the Module
 
+Best way is to use **xcaddy**:
+
+```bash
+xcaddy build --with github.com/tomsh-hr/caddy-geojs-blocker
+```
+
+or:
+
 ```bash
 # Clone Caddy
-git clone https://github.com/caddyserver/caddy.git
+git clone https://github.com/caddyserver/caddy.git && cd caddy
 
 # Add the module import
 # In cmd/caddy/main.go:
 import _ "github.com/tomsh-hr/caddy-geojs-blocker"
 
+go mod tidy
+
 # Build Caddy
-go build -o caddy -ldflags "-w -s -trimpath -tags nobadger,nomysql,nopgx"
-```
-
-Or use **xcaddy**:
-
-```bash
-xcaddy build --with github.com/tomsh-hr/caddy-geojs-blocker
+go build \
+  -tags 'nobadger,nomysql,nopgx' \
+  -trimpath \
+  -ldflags '-w -s' \
+  -o ./caddy ./cmd/caddy
 ```
 
 Then run:
@@ -50,7 +58,7 @@ Then run:
 
 ## 🧩 Usage
 
-Place the directive in a `route` or `handle` block.
+Place the directive in a `route` block.
 
 - Use **`geojs_allow`** for allowlisting (only specific countries allowed).  
 - Use **`geojs_block`** for blocklisting (specific countries blocked).  
@@ -142,7 +150,7 @@ Inline arguments are ISO2 country codes; options are set within the block.
 }
 :80 {
   geojs_allow DE US RU CN
-  respond "Hello"
+  respond "Hello from {http.vars.geojs_country}!"
 }
 ```
 

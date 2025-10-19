@@ -169,13 +169,13 @@ type GeoJSBlocker struct {
 	DebugToken string `json:"debug_token,omitempty"`
 
 	cache     *ipCache
-	pruneOnce sync.Once
 	sfGroup   singleflight.Group
 	useSF     bool
 	allowUD   bool
 	logger    *zap.Logger
 	stats     *counters
 	apiBase   string
+	stopCh chan struct{}
 }
 
 func (GeoJSBlocker) CaddyModule() caddy.ModuleInfo {
@@ -258,15 +258,20 @@ func (i *GeoJSBlocker) Provision(ctx caddy.Context) error {
 
 	// per-instance cache + pruner
 	i.cache = newIPCache(size, ttl)
-	i.pruneOnce.Do(func() {
-		go func() {
-			t := time.NewTicker(pruneDur)
-			defer t.Stop()
-			for range t.C {
-				i.cache.pruneExpired()
+	i.stopCh = make(chan struct{})
+
+	go func() {
+		t := time.NewTicker(pruneDur)
+		defer t.Stop()
+		for {
+			select {
+		case <-t.C:
+			i.cache.pruneExpired()
+		case <-i.stopCh:
+			return
 			}
-		}()
-	})
+		}
+	}()
 
 	// counters
 	i.stats = newCounters()
@@ -293,6 +298,15 @@ func (i *GeoJSBlocker) Provision(ctx caddy.Context) error {
 func (i *GeoJSBlocker) Validate() error {
 	if len(i.Blocked) > 0 && len(i.Allowed) > 0 {
 		return errors.New("geojs_block: both Blocked and Allowed are set; use only one")
+	}
+	return nil
+}
+
+// Cleanup stops the background cache pruner when the module is unloaded or replaced.
+func (i *GeoJSBlocker) Cleanup() error {
+	if i.stopCh != nil {
+		close(i.stopCh)
+		i.stopCh = nil
 	}
 	return nil
 }
@@ -362,7 +376,9 @@ func (i *GeoJSBlocker) ServeHTTP(w http.ResponseWriter, r *http.Request, next ca
 	fetch := func() (string, error) {
 		base := strings.TrimRight(i.apiBase, "/")
 		apiURL := fmt.Sprintf("%s/%s", base, ipStr)
-		resp, err := httpClient.Get(apiURL)
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, apiURL, nil)
+		if err != nil { return "", err }
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return "", err
 		}
