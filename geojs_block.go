@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -153,6 +154,54 @@ func (c *counters) reset() {
 	atomic.StoreUint64(&c.TotalAllowed, 0)
 }
 
+// countersSnapshot mirrors the debug endpoint's JSON shape and is the
+// on-disk format used to persist counters across restarts/reloads.
+type countersSnapshot struct {
+	TotalBlocked   uint64            `json:"total_blocked"`
+	TotalAllowed   uint64            `json:"total_allowed"`
+	ByCountryBlock map[string]uint64 `json:"blocked_by_cc"`
+	ByCountryAllow map[string]uint64 `json:"allowed_by_cc"`
+}
+
+// saveCountersToFile writes counters to path as JSON, via a temp file +
+// rename so a crash mid-write can't leave a truncated/corrupt file.
+func saveCountersToFile(path string, c *counters) error {
+	snap := c.snapshot()
+	data, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// loadCountersFromFile reads a previously saved snapshot. A missing file
+// is reported via the returned error (check with os.IsNotExist) so the
+// caller can fall back to a fresh, empty counters set.
+func loadCountersFromFile(path string) (*counters, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var s countersSnapshot
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, err
+	}
+	c := newCounters()
+	if s.ByCountryBlock != nil {
+		c.ByCountryBlock = s.ByCountryBlock
+	}
+	if s.ByCountryAllow != nil {
+		c.ByCountryAllow = s.ByCountryAllow
+	}
+	c.TotalBlocked = s.TotalBlocked
+	c.TotalAllowed = s.TotalAllowed
+	return c, nil
+}
+
 // GeoJSBlocker is a Caddy HTTP handler that filters requests based on GeoJS country lookup.
 // It enforces an allowlist or blocklist and maintains cache, counters, and a debug endpoint.
 type GeoJSBlocker struct {
@@ -167,6 +216,7 @@ type GeoJSBlocker struct {
 
 	DebugPath  string `json:"debug_path,omitempty"`
 	DebugToken string `json:"debug_token,omitempty"`
+	StatsFile  string `json:"stats_file,omitempty"`
 
 	cache   *ipCache
 	sfGroup *singleflight.Group
@@ -256,6 +306,18 @@ func (i *GeoJSBlocker) Provision(ctx caddy.Context) error {
 		}
 	}
 
+	// counters, optionally seeded from a prior snapshot on disk
+	i.stats = newCounters()
+	i.StatsFile = strings.TrimSpace(i.StatsFile)
+	if i.StatsFile != "" {
+		if loaded, err := loadCountersFromFile(i.StatsFile); err == nil {
+			i.stats = loaded
+		} else if !os.IsNotExist(err) {
+			i.logger.Warn("failed to load stats_file; starting with empty stats",
+				zap.String("stats_file", i.StatsFile), zap.Error(err))
+		}
+	}
+
 	// per-instance cache + pruner
 	i.cache = newIPCache(size, ttl)
 	i.sfGroup = new(singleflight.Group)
@@ -268,14 +330,16 @@ func (i *GeoJSBlocker) Provision(ctx caddy.Context) error {
 			select {
 			case <-t.C:
 				i.cache.pruneExpired()
+				if i.StatsFile != "" {
+					if err := saveCountersToFile(i.StatsFile, i.stats); err != nil {
+						i.logger.Warn("failed to persist stats_file", zap.String("stats_file", i.StatsFile), zap.Error(err))
+					}
+				}
 			case <-i.stopCh:
 				return
 			}
 		}
 	}()
-
-	// counters
-	i.stats = newCounters()
 
 	// default API base (kept private; tests can override)
 	if strings.TrimSpace(i.apiBase) == "" {
@@ -291,6 +355,7 @@ func (i *GeoJSBlocker) Provision(ctx caddy.Context) error {
 		zap.Bool("singleflight", i.useSF),
 		zap.Bool("allow_undetected", i.allowUD),
 		zap.String("debug_path", i.DebugPath),
+		zap.String("stats_file", i.StatsFile),
 	)
 
 	return nil
@@ -303,11 +368,17 @@ func (i *GeoJSBlocker) Validate() error {
 	return nil
 }
 
-// Cleanup stops the background cache pruner when the module is unloaded or replaced.
+// Cleanup stops the background cache pruner and persists a final stats
+// snapshot (if stats_file is set) when the module is unloaded or replaced.
 func (i *GeoJSBlocker) Cleanup() error {
 	if i.stopCh != nil {
 		close(i.stopCh)
 		i.stopCh = nil
+	}
+	if i.StatsFile != "" && i.stats != nil {
+		if err := saveCountersToFile(i.StatsFile, i.stats); err != nil {
+			i.logger.Warn("failed to persist stats_file on cleanup", zap.String("stats_file", i.StatsFile), zap.Error(err))
+		}
 	}
 	return nil
 }
@@ -337,6 +408,11 @@ func (i *GeoJSBlocker) tryServeDebug(w http.ResponseWriter, r *http.Request) boo
 	// reset if requested
 	if r.Method == http.MethodPost && (r.URL.Query().Get("reset") == "1" || r.URL.Query().Get("reset") == "true") {
 		i.stats.reset()
+		if i.StatsFile != "" {
+			if err := saveCountersToFile(i.StatsFile, i.stats); err != nil {
+				i.logger.Warn("failed to persist stats_file after reset", zap.String("stats_file", i.StatsFile), zap.Error(err))
+			}
+		}
 	}
 
 	snap := i.stats.snapshot()
@@ -521,7 +597,7 @@ func clientIPFromRequest(r *http.Request) string {
 
 // Caddyfile parsing
 
-func parseListAndOptions(h httpcaddyfile.Helper) (codes []string, ttl string, size int, sf string, allowUD string, dbgPath string, dbgTok string, pruneInt string, err error) {
+func parseListAndOptions(h httpcaddyfile.Helper) (codes []string, ttl string, size int, sf string, allowUD string, dbgPath string, dbgTok string, pruneInt string, statsFile string, err error) {
 	d := h.Dispenser
 	for d.Next() {
 		// inline: treat as country codes
@@ -532,55 +608,61 @@ func parseListAndOptions(h httpcaddyfile.Helper) (codes []string, ttl string, si
 			case "cache_ttl":
 				args := d.RemainingArgs()
 				if len(args) != 1 {
-					return nil, "", 0, "", "", "", "", "", d.Errf("cache_ttl expects 1 argument (e.g., 15m)")
+					return nil, "", 0, "", "", "", "", "", "", d.Errf("cache_ttl expects 1 argument (e.g., 15m)")
 				}
 				if _, perr := time.ParseDuration(args[0]); perr != nil {
-					return nil, "", 0, "", "", "", "", "", d.Errf("invalid cache_ttl %q: %v", args[0], perr)
+					return nil, "", 0, "", "", "", "", "", "", d.Errf("invalid cache_ttl %q: %v", args[0], perr)
 				}
 				ttl = args[0]
 			case "cache_size":
 				args := d.RemainingArgs()
 				if len(args) != 1 {
-					return nil, "", 0, "", "", "", "", "", d.Errf("cache_size expects 1 integer argument")
+					return nil, "", 0, "", "", "", "", "", "", d.Errf("cache_size expects 1 integer argument")
 				}
 				n, perr := strconv.Atoi(args[0])
 				if perr != nil || n <= 0 {
-					return nil, "", 0, "", "", "", "", "", d.Errf("invalid cache_size %q", args[0])
+					return nil, "", 0, "", "", "", "", "", "", d.Errf("invalid cache_size %q", args[0])
 				}
 				size = n
 			case "singleflight":
 				args := d.RemainingArgs()
 				if len(args) != 1 {
-					return nil, "", 0, "", "", "", "", "", d.Errf("singleflight expects 'on' or 'off'")
+					return nil, "", 0, "", "", "", "", "", "", d.Errf("singleflight expects 'on' or 'off'")
 				}
 				sf = args[0]
 			case "allow_undetected":
 				args := d.RemainingArgs()
 				if len(args) != 1 {
-					return nil, "", 0, "", "", "", "", "", d.Errf("allow_undetected expects 'on' or 'off'")
+					return nil, "", 0, "", "", "", "", "", "", d.Errf("allow_undetected expects 'on' or 'off'")
 				}
 				allowUD = args[0]
 			case "prune_interval":
 				args := d.RemainingArgs()
 				if len(args) != 1 {
-					return nil, "", 0, "", "", "", "", "", d.Errf("prune_interval expects 1 duration (e.g., 5m)")
+					return nil, "", 0, "", "", "", "", "", "", d.Errf("prune_interval expects 1 duration (e.g., 5m)")
 				}
 				if _, perr := time.ParseDuration(args[0]); perr != nil {
-					return nil, "", 0, "", "", "", "", "", d.Errf("invalid prune_interval %q: %v", args[0], perr)
+					return nil, "", 0, "", "", "", "", "", "", d.Errf("invalid prune_interval %q: %v", args[0], perr)
 				}
 				pruneInt = args[0]
 			case "debug_path":
 				args := d.RemainingArgs()
 				if len(args) != 1 {
-					return nil, "", 0, "", "", "", "", "", d.Errf("debug_path expects 1 path (e.g., /debug/geojs)")
+					return nil, "", 0, "", "", "", "", "", "", d.Errf("debug_path expects 1 path (e.g., /debug/geojs)")
 				}
 				dbgPath = strings.TrimSpace(args[0])
 			case "debug_token":
 				args := d.RemainingArgs()
 				if len(args) != 1 {
-					return nil, "", 0, "", "", "", "", "", d.Errf("debug_token expects 1 value")
+					return nil, "", 0, "", "", "", "", "", "", d.Errf("debug_token expects 1 value")
 				}
 				dbgTok = strings.TrimSpace(args[0])
+			case "stats_file":
+				args := d.RemainingArgs()
+				if len(args) != 1 {
+					return nil, "", 0, "", "", "", "", "", "", d.Errf("stats_file expects 1 path (e.g., /var/lib/caddy/geojs_stats.json)")
+				}
+				statsFile = strings.TrimSpace(args[0])
 			default:
 				// treat entire line as country codes: first token + remainder
 				if key != "" {
@@ -590,12 +672,12 @@ func parseListAndOptions(h httpcaddyfile.Helper) (codes []string, ttl string, si
 			}
 		}
 	}
-	return codes, ttl, size, sf, allowUD, dbgPath, dbgTok, pruneInt, nil
+	return codes, ttl, size, sf, allowUD, dbgPath, dbgTok, pruneInt, statsFile, nil
 }
 
 func parseCaddyfileDirectiveBlock(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	var i GeoJSBlocker
-	codes, ttl, size, sf, allowUD, dbgPath, dbgTok, pruneInt, err := parseListAndOptions(h)
+	codes, ttl, size, sf, allowUD, dbgPath, dbgTok, pruneInt, statsFile, err := parseListAndOptions(h)
 	if err != nil {
 		return nil, err
 	}
@@ -613,12 +695,13 @@ func parseCaddyfileDirectiveBlock(h httpcaddyfile.Helper) (caddyhttp.MiddlewareH
 	i.PruneInterval = pruneInt
 	i.DebugPath = dbgPath
 	i.DebugToken = dbgTok
+	i.StatsFile = statsFile
 	return &i, nil
 }
 
 func parseCaddyfileDirectiveAllow(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	var i GeoJSBlocker
-	codes, ttl, size, sf, allowUD, dbgPath, dbgTok, pruneInt, err := parseListAndOptions(h)
+	codes, ttl, size, sf, allowUD, dbgPath, dbgTok, pruneInt, statsFile, err := parseListAndOptions(h)
 	if err != nil {
 		return nil, err
 	}
@@ -636,6 +719,7 @@ func parseCaddyfileDirectiveAllow(h httpcaddyfile.Helper) (caddyhttp.MiddlewareH
 	i.PruneInterval = pruneInt
 	i.DebugPath = dbgPath
 	i.DebugToken = dbgTok
+	i.StatsFile = statsFile
 	return &i, nil
 }
 
