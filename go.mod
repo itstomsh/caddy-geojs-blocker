@@ -1,4 +1,4 @@
-module github.com/tomsh-hr/caddy-geojs-blocker
+module github.com/itstomsh/caddy-geojs-blocker
 
 go 1.25.3
 

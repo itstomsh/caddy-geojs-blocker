@@ -168,14 +168,14 @@ type GeoJSBlocker struct {
 	DebugPath  string `json:"debug_path,omitempty"`
 	DebugToken string `json:"debug_token,omitempty"`
 
-	cache     *ipCache
-	sfGroup   singleflight.Group
-	useSF     bool
-	allowUD   bool
-	logger    *zap.Logger
-	stats     *counters
-	apiBase   string
-	stopCh chan struct{}
+	cache   *ipCache
+	sfGroup *singleflight.Group
+	useSF   bool
+	allowUD bool
+	logger  *zap.Logger
+	stats   *counters
+	apiBase string
+	stopCh  chan struct{}
 }
 
 func (GeoJSBlocker) CaddyModule() caddy.ModuleInfo {
@@ -225,26 +225,26 @@ func (i *GeoJSBlocker) Provision(ctx caddy.Context) error {
 
 	i.useSF = true
 	switch strings.ToLower(strings.TrimSpace(i.Singleflight)) {
-		case "", "on", "true", "1", "yes":
-			i.useSF = true
-		case "off", "false", "0", "no":
-			i.useSF = false
-		default:
-			if i.Singleflight != "" {
-				i.logger.Warn("invalid singleflight; using default 'on'", zap.String("singleflight", i.Singleflight))
-			}
+	case "", "on", "true", "1", "yes":
+		i.useSF = true
+	case "off", "false", "0", "no":
+		i.useSF = false
+	default:
+		if i.Singleflight != "" {
+			i.logger.Warn("invalid singleflight; using default 'on'", zap.String("singleflight", i.Singleflight))
+		}
 	}
 
 	i.allowUD = true
 	switch strings.ToLower(strings.TrimSpace(i.AllowUndetected)) {
-		case "", "on", "true", "1", "yes":
-			i.allowUD = true
-		case "off", "false", "0", "no":
-			i.allowUD = false
-		default:
-			if i.AllowUndetected != "" {
-				i.logger.Warn("invalid allow_undetected; using default 'on'", zap.String("allow_undetected", i.AllowUndetected))
-			}
+	case "", "on", "true", "1", "yes":
+		i.allowUD = true
+	case "off", "false", "0", "no":
+		i.allowUD = false
+	default:
+		if i.AllowUndetected != "" {
+			i.logger.Warn("invalid allow_undetected; using default 'on'", zap.String("allow_undetected", i.AllowUndetected))
+		}
 	}
 
 	pruneDur := 5 * time.Minute
@@ -258,6 +258,7 @@ func (i *GeoJSBlocker) Provision(ctx caddy.Context) error {
 
 	// per-instance cache + pruner
 	i.cache = newIPCache(size, ttl)
+	i.sfGroup = new(singleflight.Group)
 	i.stopCh = make(chan struct{})
 
 	go func() {
@@ -265,10 +266,10 @@ func (i *GeoJSBlocker) Provision(ctx caddy.Context) error {
 		defer t.Stop()
 		for {
 			select {
-		case <-t.C:
-			i.cache.pruneExpired()
-		case <-i.stopCh:
-			return
+			case <-t.C:
+				i.cache.pruneExpired()
+			case <-i.stopCh:
+				return
 			}
 		}
 	}()
@@ -282,14 +283,14 @@ func (i *GeoJSBlocker) Provision(ctx caddy.Context) error {
 	}
 
 	i.logger.Info("geojs_block initialized",
-		      zap.Strings("blocked", i.Blocked),
-		      zap.Strings("allowed", i.Allowed),
-		      zap.Duration("cache_ttl", ttl),
-		      zap.Int("cache_size", size),
-		      zap.Duration("prune_interval", pruneDur),
-		      zap.Bool("singleflight", i.useSF),
-		      zap.Bool("allow_undetected", i.allowUD),
-		      zap.String("debug_path", i.DebugPath),
+		zap.Strings("blocked", i.Blocked),
+		zap.Strings("allowed", i.Allowed),
+		zap.Duration("cache_ttl", ttl),
+		zap.Int("cache_size", size),
+		zap.Duration("prune_interval", pruneDur),
+		zap.Bool("singleflight", i.useSF),
+		zap.Bool("allow_undetected", i.allowUD),
+		zap.String("debug_path", i.DebugPath),
 	)
 
 	return nil
@@ -362,7 +363,7 @@ func (i *GeoJSBlocker) ServeHTTP(w http.ResponseWriter, r *http.Request, next ca
 	ip := net.ParseIP(ipStr)
 	if ip != nil && (ip.IsLoopback() || ip.IsPrivate()) {
 		i.logger.Debug("skip local/private IP (auto-allow)",
-			       zap.String("ip", ipStr))
+			zap.String("ip", ipStr))
 		setLogVars(r, "LOCAL", "allow_local")
 		return next.ServeHTTP(w, r)
 	}
@@ -377,7 +378,9 @@ func (i *GeoJSBlocker) ServeHTTP(w http.ResponseWriter, r *http.Request, next ca
 		base := strings.TrimRight(i.apiBase, "/")
 		apiURL := fmt.Sprintf("%s/%s", base, ipStr)
 		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, apiURL, nil)
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			return "", err
@@ -447,14 +450,18 @@ func (i *GeoJSBlocker) decide(country string, w http.ResponseWriter, r *http.Req
 		if contains(i.Allowed, country) {
 			setLogVars(r, country, "allow")
 			i.logger.Debug("geojs allow (allowlist)",
-				       zap.String("ip", ip), zap.String("country", country), zap.String("source", src))
-			if !fromCache { i.stats.incAllow(country) }
+				zap.String("ip", ip), zap.String("country", country), zap.String("source", src))
+			if !fromCache {
+				i.stats.incAllow(country)
+			}
 			return next.ServeHTTP(w, r)
 		}
 		setLogVars(r, country, "block")
 		i.logger.Warn("geojs block (not in allowlist)",
-			      zap.String("ip", ip), zap.String("country", country), zap.String("source", src))
-		if !fromCache { i.stats.incBlock(country) }
+			zap.String("ip", ip), zap.String("country", country), zap.String("source", src))
+		if !fromCache {
+			i.stats.incBlock(country)
+		}
 		return caddyhttp.Error(http.StatusForbidden, fmt.Errorf("country not allowed"))
 	}
 
@@ -462,15 +469,19 @@ func (i *GeoJSBlocker) decide(country string, w http.ResponseWriter, r *http.Req
 	if len(i.Blocked) > 0 && contains(i.Blocked, country) {
 		setLogVars(r, country, "block")
 		i.logger.Warn("geojs block (blocklist)",
-			      zap.String("ip", ip), zap.String("country", country), zap.String("source", src))
-		if !fromCache { i.stats.incBlock(country) }
+			zap.String("ip", ip), zap.String("country", country), zap.String("source", src))
+		if !fromCache {
+			i.stats.incBlock(country)
+		}
 		return caddyhttp.Error(http.StatusForbidden, fmt.Errorf("country blocked"))
 	}
 
 	setLogVars(r, country, "allow")
 	i.logger.Debug("geojs allow",
-		       zap.String("ip", ip), zap.String("country", country), zap.String("source", src))
-	if !fromCache { i.stats.incAllow(country) }
+		zap.String("ip", ip), zap.String("country", country), zap.String("source", src))
+	if !fromCache {
+		i.stats.incAllow(country)
+	}
 	return next.ServeHTTP(w, r)
 }
 
@@ -518,64 +529,64 @@ func parseListAndOptions(h httpcaddyfile.Helper) (codes []string, ttl string, si
 		for nesting := d.Nesting(); d.NextBlock(nesting); {
 			key := strings.ToLower(strings.TrimSpace(d.Val()))
 			switch key {
-				case "cache_ttl":
-					args := d.RemainingArgs()
-					if len(args) != 1 {
-						return nil, "", 0, "", "", "", "", "", d.Errf("cache_ttl expects 1 argument (e.g., 15m)")
-					}
-					if _, perr := time.ParseDuration(args[0]); perr != nil {
-						return nil, "", 0, "", "", "", "", "", d.Errf("invalid cache_ttl %q: %v", args[0], perr)
-					}
-					ttl = args[0]
-				case "cache_size":
-					args := d.RemainingArgs()
-					if len(args) != 1 {
-						return nil, "", 0, "", "", "", "", "", d.Errf("cache_size expects 1 integer argument")
-					}
-					n, perr := strconv.Atoi(args[0])
-					if perr != nil || n <= 0 {
-						return nil, "", 0, "", "", "", "", "", d.Errf("invalid cache_size %q", args[0])
-					}
-					size = n
-				case "singleflight":
-					args := d.RemainingArgs()
-					if len(args) != 1 {
-						return nil, "", 0, "", "", "", "", "", d.Errf("singleflight expects 'on' or 'off'")
-					}
-					sf = args[0]
-				case "allow_undetected":
-					args := d.RemainingArgs()
-					if len(args) != 1 {
-						return nil, "", 0, "", "", "", "", "", d.Errf("allow_undetected expects 'on' or 'off'")
-					}
-					allowUD = args[0]
-				case "prune_interval":
-					args := d.RemainingArgs()
-					if len(args) != 1 {
-						return nil, "", 0, "", "", "", "", "", d.Errf("prune_interval expects 1 duration (e.g., 5m)")
-					}
-					if _, perr := time.ParseDuration(args[0]); perr != nil {
-						return nil, "", 0, "", "", "", "", "", d.Errf("invalid prune_interval %q: %v", args[0], perr)
-					}
-					pruneInt = args[0]
-				case "debug_path":
-					args := d.RemainingArgs()
-					if len(args) != 1 {
-						return nil, "", 0, "", "", "", "", "", d.Errf("debug_path expects 1 path (e.g., /debug/geojs)")
-					}
-					dbgPath = strings.TrimSpace(args[0])
-				case "debug_token":
-					args := d.RemainingArgs()
-					if len(args) != 1 {
-						return nil, "", 0, "", "", "", "", "", d.Errf("debug_token expects 1 value")
-					}
-					dbgTok = strings.TrimSpace(args[0])
-				default:
-					// treat entire line as country codes: first token + remainder
-					if key != "" {
-						codes = append(codes, key)
-					}
-					codes = append(codes, d.RemainingArgs()...)
+			case "cache_ttl":
+				args := d.RemainingArgs()
+				if len(args) != 1 {
+					return nil, "", 0, "", "", "", "", "", d.Errf("cache_ttl expects 1 argument (e.g., 15m)")
+				}
+				if _, perr := time.ParseDuration(args[0]); perr != nil {
+					return nil, "", 0, "", "", "", "", "", d.Errf("invalid cache_ttl %q: %v", args[0], perr)
+				}
+				ttl = args[0]
+			case "cache_size":
+				args := d.RemainingArgs()
+				if len(args) != 1 {
+					return nil, "", 0, "", "", "", "", "", d.Errf("cache_size expects 1 integer argument")
+				}
+				n, perr := strconv.Atoi(args[0])
+				if perr != nil || n <= 0 {
+					return nil, "", 0, "", "", "", "", "", d.Errf("invalid cache_size %q", args[0])
+				}
+				size = n
+			case "singleflight":
+				args := d.RemainingArgs()
+				if len(args) != 1 {
+					return nil, "", 0, "", "", "", "", "", d.Errf("singleflight expects 'on' or 'off'")
+				}
+				sf = args[0]
+			case "allow_undetected":
+				args := d.RemainingArgs()
+				if len(args) != 1 {
+					return nil, "", 0, "", "", "", "", "", d.Errf("allow_undetected expects 'on' or 'off'")
+				}
+				allowUD = args[0]
+			case "prune_interval":
+				args := d.RemainingArgs()
+				if len(args) != 1 {
+					return nil, "", 0, "", "", "", "", "", d.Errf("prune_interval expects 1 duration (e.g., 5m)")
+				}
+				if _, perr := time.ParseDuration(args[0]); perr != nil {
+					return nil, "", 0, "", "", "", "", "", d.Errf("invalid prune_interval %q: %v", args[0], perr)
+				}
+				pruneInt = args[0]
+			case "debug_path":
+				args := d.RemainingArgs()
+				if len(args) != 1 {
+					return nil, "", 0, "", "", "", "", "", d.Errf("debug_path expects 1 path (e.g., /debug/geojs)")
+				}
+				dbgPath = strings.TrimSpace(args[0])
+			case "debug_token":
+				args := d.RemainingArgs()
+				if len(args) != 1 {
+					return nil, "", 0, "", "", "", "", "", d.Errf("debug_token expects 1 value")
+				}
+				dbgTok = strings.TrimSpace(args[0])
+			default:
+				// treat entire line as country codes: first token + remainder
+				if key != "" {
+					codes = append(codes, key)
+				}
+				codes = append(codes, d.RemainingArgs()...)
 			}
 		}
 	}

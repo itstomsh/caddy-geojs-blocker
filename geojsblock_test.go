@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
-	"sync/atomic"
 
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
@@ -178,9 +178,9 @@ func TestFetch(t *testing.T) {
 	i := &GeoJSBlocker{
 		logger:  zap.NewNop(),
 		stats:   newCounters(),
-		apiBase: srv.URL,             // inject mock base URL
-		useSF:   false,               // keep simple for this test
-		allowUD: true,                // allow if something goes wrong
+		apiBase: srv.URL, // inject mock base URL
+		useSF:   false,   // keep simple for this test
+		allowUD: true,    // allow if something goes wrong
 		cache:   newIPCache(10, time.Minute),
 		// Make decision path explicit -> allowlist includes DE
 		Allowed: []string{"DE"},
