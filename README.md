@@ -1,5 +1,5 @@
 # Caddy GeoJS Blocker Module
-![Go CI](https://github.com/tomsh-hr/caddy-geojs-blocker/actions/workflows/go.yml/badge.svg)
+![Go CI](https://github.com/itstomsh/caddy-geojs-blocker/actions/workflows/go.yml/badge.svg)
 
 A lightweight **Caddy v2 HTTP handler module** for **geoblocking** or **geowhitelisting** requests based on client IP country codes, using the free [GeoJS API](https://www.geojs.io/).  
 Supports both **allowlisting** (default allow, block others) and **blocklisting** (default allow, block specific).  
@@ -25,7 +25,7 @@ Includes per-instance caching, concurrency-safe stats, and an optional debug end
 Best way is to use **xcaddy**:
 
 ```bash
-xcaddy build --with github.com/tomsh-hr/caddy-geojs-blocker
+xcaddy build --with github.com/itstomsh/caddy-geojs-blocker
 ```
 
 or:
@@ -36,7 +36,7 @@ git clone https://github.com/caddyserver/caddy.git && cd caddy
 
 # Add the module import
 # In cmd/caddy/main.go:
-import _ "github.com/tomsh-hr/caddy-geojs-blocker"
+import _ "github.com/itstomsh/caddy-geojs-blocker"
 
 go mod tidy
 
@@ -202,6 +202,8 @@ If `debug_path` is set (e.g., `/debug/geojs`):
   "blocked_by_cc": {}
 }
 ```
+
+Note: counters only track fresh GeoJS lookups — requests served from the IP cache are not added to the totals.
 
 **POST ?reset=1** → Resets counters.  
 **Example:**
