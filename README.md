@@ -168,6 +168,7 @@ Inline arguments are ISO2 country codes; options are set within the block.
 | **prune_interval** | Duration | Prune expired cache entries | `prune_interval 1h` | `5m` |
 | **debug_path** | string | Path for stats JSON endpoint | `debug_path /debug/geojs` | *(disabled)* |
 | **debug_token** | string | Token for debug auth (header `X-Debug-Token`) | `debug_token mysecret` | *(none)* |
+| **stats_file** | string | File path to persist stats counters across restarts/reloads | `stats_file /var/lib/caddy/geojs_stats.json` | *(disabled)* |
 
 ---
 
@@ -218,6 +219,25 @@ Requires header `X-Debug-Token: {token}` if `debug_token` is set.
 curl -H "X-Debug-Token: mysecret" http://localhost:80/debug/geojs
 curl -X POST -H "X-Debug-Token: mysecret" http://localhost:80/debug/geojs?reset=1
 ```
+
+### 💾 Persisting Stats Across Restarts
+
+By default, stats live only in memory and reset to zero on every Caddy restart **and** on config reloads (since a reload re-provisions the module).
+
+Set `stats_file` to a writable path to persist counters across both:
+
+```caddyfile
+geojs_allow DE US RU CN {
+  debug_path /debug/geojs
+  stats_file /var/lib/caddy/geojs_stats.json
+}
+```
+
+How it works:
+- On startup/reload, the module loads the last saved snapshot from `stats_file` (if present) instead of starting from zero.
+- The snapshot is written back to disk on the same `prune_interval` tick, after a `POST ?reset=1`, and once more on shutdown/reload (`Cleanup`).
+- Writes are atomic (temp file + rename), so a crash mid-write won't corrupt the file.
+- This is a lightweight, single-file mechanism — not a durable store. A hard `SIGKILL` between two flush ticks can still lose the most recent counts.
 
 ---
 
