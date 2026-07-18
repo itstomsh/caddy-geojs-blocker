@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -235,6 +237,43 @@ func TestClientIPFromRequest(t *testing.T) {
 	r3.RemoteAddr = "1.2.3.4:1234"
 	if got := clientIPFromRequest(r3); got != "1.2.3.4" {
 		t.Errorf("clientIPFromRequest(Remote) = %q, want 1.2.3.4", got)
+	}
+}
+
+func TestCountersFileRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stats.json")
+
+	c := newCounters()
+	c.incAllow("DE")
+	c.incAllow("DE")
+	c.incBlock("US")
+
+	if err := saveCountersToFile(path, c); err != nil {
+		t.Fatalf("saveCountersToFile() error = %v", err)
+	}
+
+	loaded, err := loadCountersFromFile(path)
+	if err != nil {
+		t.Fatalf("loadCountersFromFile() error = %v", err)
+	}
+	if loaded.TotalAllowed != 2 {
+		t.Errorf("loaded.TotalAllowed = %d, want 2", loaded.TotalAllowed)
+	}
+	if loaded.TotalBlocked != 1 {
+		t.Errorf("loaded.TotalBlocked = %d, want 1", loaded.TotalBlocked)
+	}
+	if loaded.ByCountryAllow["DE"] != 2 {
+		t.Errorf("loaded.ByCountryAllow[DE] = %d, want 2", loaded.ByCountryAllow["DE"])
+	}
+	if loaded.ByCountryBlock["US"] != 1 {
+		t.Errorf("loaded.ByCountryBlock[US] = %d, want 1", loaded.ByCountryBlock["US"])
+	}
+}
+
+func TestLoadCountersFromFileMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "does-not-exist.json")
+	if _, err := loadCountersFromFile(path); !os.IsNotExist(err) {
+		t.Errorf("loadCountersFromFile(missing) error = %v, want os.IsNotExist", err)
 	}
 }
 
