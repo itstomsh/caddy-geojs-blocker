@@ -117,6 +117,8 @@ Inline arguments are ISO2 country codes; options are set within the block.
       prune_interval 2m
       debug_path /debug/geojs
       debug_token mysecret
+      stats_file /var/lib/caddy/geojs_stats.json
+      stats_flush_interval 1m
     }
 
     respond "Welcome from {http.vars.geojs_country} ({http.vars.geojs_decision})"
