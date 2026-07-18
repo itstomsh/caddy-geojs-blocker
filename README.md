@@ -158,6 +158,44 @@ Inline arguments are ISO2 country codes; options are set within the block.
 
 ---
 
+### 🎯 Allowing or Blocking Specific IPs
+
+This module only makes decisions by **country**. For plain IP/CIDR allow- or block-listing — e.g. "only my VPS may reach this site, regardless of country" — use Caddy's built-in [`remote_ip`](https://caddyserver.com/docs/caddyfile/matchers#remote-ip) matcher instead of extending this module. It's evaluated before any GeoJS lookup happens, so no API call or cache entry is wasted on IPs you already have a fixed decision for.
+
+**Only allow one specific IP (e.g. your VPS), block everyone else:**
+
+```caddyfile
+:80 {
+  @vps remote_ip 203.0.113.10
+  route @vps {
+    respond "Hello from the VPS!"
+  }
+  respond "Forbidden" 403
+}
+```
+
+**Combine it with `geojs_allow`/`geojs_block`, reaching the same handler either way** — e.g. allow requests from Germany *or* from one trusted IP (your VPS), and serve identical content to both:
+
+```caddyfile
+:80 {
+  @trusted remote_ip 203.0.113.10 198.51.100.0/24
+  @untrusted not remote_ip 203.0.113.10 198.51.100.0/24
+
+  route @trusted {
+    # trusted IP - skip the geo check entirely, fall through below
+  }
+  route @untrusted {
+    geojs_allow DE
+  }
+
+  respond "Welcome!"
+}
+```
+
+`route @trusted { }` has an empty body, so matching requests just fall through to `respond` untouched. Non-matching requests hit `route @untrusted`, which runs `geojs_allow DE` — if it blocks, the request stops there with a `403` and never reaches `respond`; if it allows, it falls through to the same `respond` the trusted IP gets. Requests handled by the `@trusted` branch never reach `geojs_allow`, so they won't appear in this module's stats or set `geojs_country`/`geojs_decision` — those log vars are only set for requests that actually went through the GeoJS check.
+
+---
+
 ## 🔧 Options
 
 | Option | Type | Description | Example | Default |
