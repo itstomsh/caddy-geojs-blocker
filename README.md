@@ -203,11 +203,17 @@ If `debug_path` is set (e.g., `/debug/geojs`):
   "total_allowed": 4,
   "total_blocked": 0,
   "allowed_by_cc": { "DE": 2, "US": 1, "RU": 1, "CN": 0 },
-  "blocked_by_cc": {}
+  "blocked_by_cc": {},
+  "cache_hits": 12,
+  "api_calls": 4,
+  "api_errors": 0
 }
 ```
 
-Note: counters only track fresh GeoJS lookups — requests served from the IP cache are not added to the totals.
+- `total_allowed`/`total_blocked` (and their per-country breakdowns) only count fresh GeoJS lookups — requests served from the IP cache don't add to these totals.
+- `cache_hits` counts requests resolved straight from the in-memory cache, with no GeoJS call.
+- `api_calls` counts actual physical calls made to the GeoJS API. With `singleflight on` (the default), concurrent requests for the same uncached IP are collapsed into a single call, so this reflects real upstream traffic, not request volume.
+- `api_errors` is the subset of `api_calls` that failed (network error, non-200 status, or an unparseable response) — useful for spotting GeoJS outages or rate-limiting.
 
 **POST ?reset=1** → Resets counters.  
 **Example:**
