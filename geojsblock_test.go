@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -274,6 +275,54 @@ func TestLoadCountersFromFileMissing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "does-not-exist.json")
 	if _, err := loadCountersFromFile(path); !os.IsNotExist(err) {
 		t.Errorf("loadCountersFromFile(missing) error = %v, want os.IsNotExist", err)
+	}
+}
+
+func TestSaveCountersToFileCreatesParentDir(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "dir", "stats.json")
+	c := newCounters()
+	c.incAllow("DE")
+
+	if err := saveCountersToFile(path, c); err != nil {
+		t.Fatalf("saveCountersToFile() error = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected stats file to exist, stat error = %v", err)
+	}
+}
+
+// TestFlushStatsFileConcurrent guards against the race fixed by statsFileMu:
+// the periodic ticker, a debug-endpoint reset, and Cleanup can all call
+// flushStatsFile from different goroutines, and previously nothing
+// serialized their writes to the same tmp file.
+func TestFlushStatsFileConcurrent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stats.json")
+	i := &GeoJSBlocker{
+		logger:      zap.NewNop(),
+		stats:       newCounters(),
+		statsFileMu: &sync.Mutex{},
+		StatsFile:   path,
+	}
+
+	var wg sync.WaitGroup
+	for n := 0; n < 50; n++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			i.stats.incAllow("DE")
+			i.flushStatsFile("test")
+		}()
+	}
+	wg.Wait()
+
+	// The file must always be valid, complete JSON - never a torn write
+	// from two goroutines racing on the same tmp file/rename.
+	loaded, err := loadCountersFromFile(path)
+	if err != nil {
+		t.Fatalf("loadCountersFromFile() error = %v (file corrupted by concurrent writes?)", err)
+	}
+	if loaded.TotalAllowed != 50 {
+		t.Errorf("loaded.TotalAllowed = %d, want 50", loaded.TotalAllowed)
 	}
 }
 

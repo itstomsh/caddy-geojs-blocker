@@ -169,6 +169,7 @@ Inline arguments are ISO2 country codes; options are set within the block.
 | **debug_path** | string | Path for stats JSON endpoint | `debug_path /debug/geojs` | *(disabled)* |
 | **debug_token** | string | Token for debug auth (header `X-Debug-Token`) | `debug_token mysecret` | *(none)* |
 | **stats_file** | string | File path to persist stats counters across restarts/reloads | `stats_file /var/lib/caddy/geojs_stats.json` | *(disabled)* |
+| **stats_flush_interval** | Duration | How often `stats_file` is written to disk | `stats_flush_interval 1m` | same as `prune_interval` |
 
 ---
 
@@ -230,13 +231,15 @@ Set `stats_file` to a writable path to persist counters across both:
 geojs_allow DE US RU CN {
   debug_path /debug/geojs
   stats_file /var/lib/caddy/geojs_stats.json
+  stats_flush_interval 1m
 }
 ```
 
 How it works:
 - On startup/reload, the module loads the last saved snapshot from `stats_file` (if present) instead of starting from zero.
-- The snapshot is written back to disk on the same `prune_interval` tick, after a `POST ?reset=1`, and once more on shutdown/reload (`Cleanup`).
-- Writes are atomic (temp file + rename), so a crash mid-write won't corrupt the file.
+- The snapshot is written back to disk on a `stats_flush_interval` tick (defaults to the same value as `prune_interval` if not set), after a `POST ?reset=1`, and once more on shutdown/reload (`Cleanup`).
+- Writes are atomic (temp file + rename) and serialized internally, so the periodic flush, a debug reset, and shutdown can never race on the same file even if they land at the same instant.
+- Parent directories for `stats_file` are created automatically if they don't exist.
 - This is a lightweight, single-file mechanism — not a durable store. A hard `SIGKILL` between two flush ticks can still lose the most recent counts.
 
 ---
