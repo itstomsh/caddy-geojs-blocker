@@ -97,6 +97,9 @@ type counters struct {
 	ByCountryAllow map[string]uint64
 	TotalBlocked   uint64
 	TotalAllowed   uint64
+	CacheHits      uint64 // requests resolved from the IP cache, no GeoJS call made
+	ApiCalls       uint64 // physical GeoJS API calls (singleflight collapses concurrent duplicates into one)
+	ApiErrors      uint64 // subset of ApiCalls that failed (network error, bad status, invalid country)
 }
 
 func newCounters() *counters {
@@ -126,6 +129,18 @@ func (c *counters) incAllow(country string) {
 	atomic.AddUint64(&c.TotalAllowed, 1)
 }
 
+func (c *counters) incCacheHit() {
+	atomic.AddUint64(&c.CacheHits, 1)
+}
+
+func (c *counters) incApiCall() {
+	atomic.AddUint64(&c.ApiCalls, 1)
+}
+
+func (c *counters) incApiError() {
+	atomic.AddUint64(&c.ApiErrors, 1)
+}
+
 func (c *counters) snapshot() map[string]any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -143,6 +158,9 @@ func (c *counters) snapshot() map[string]any {
 		"total_allowed": atomic.LoadUint64(&c.TotalAllowed),
 		"blocked_by_cc": blockCopy,
 		"allowed_by_cc": allowCopy,
+		"cache_hits":    atomic.LoadUint64(&c.CacheHits),
+		"api_calls":     atomic.LoadUint64(&c.ApiCalls),
+		"api_errors":    atomic.LoadUint64(&c.ApiErrors),
 	}
 }
 
@@ -153,6 +171,9 @@ func (c *counters) reset() {
 	c.mu.Unlock()
 	atomic.StoreUint64(&c.TotalBlocked, 0)
 	atomic.StoreUint64(&c.TotalAllowed, 0)
+	atomic.StoreUint64(&c.CacheHits, 0)
+	atomic.StoreUint64(&c.ApiCalls, 0)
+	atomic.StoreUint64(&c.ApiErrors, 0)
 }
 
 // countersSnapshot mirrors the debug endpoint's JSON shape and is the
@@ -162,6 +183,9 @@ type countersSnapshot struct {
 	TotalAllowed   uint64            `json:"total_allowed"`
 	ByCountryBlock map[string]uint64 `json:"blocked_by_cc"`
 	ByCountryAllow map[string]uint64 `json:"allowed_by_cc"`
+	CacheHits      uint64            `json:"cache_hits"`
+	ApiCalls       uint64            `json:"api_calls"`
+	ApiErrors      uint64            `json:"api_errors"`
 }
 
 // saveCountersToFile writes counters to path as JSON, via a temp file +
@@ -205,6 +229,9 @@ func loadCountersFromFile(path string) (*counters, error) {
 	}
 	c.TotalBlocked = s.TotalBlocked
 	c.TotalAllowed = s.TotalAllowed
+	c.CacheHits = s.CacheHits
+	c.ApiCalls = s.ApiCalls
+	c.ApiErrors = s.ApiErrors
 	return c, nil
 }
 
@@ -482,31 +509,38 @@ func (i *GeoJSBlocker) ServeHTTP(w http.ResponseWriter, r *http.Request, next ca
 
 	// 1) cache
 	if ctry, ok := i.cache.Get(ipStr); ok {
+		i.stats.incCacheHit()
 		return i.decide(ctry, w, r, next, true, ipStr)
 	}
 
 	// 2) lookup (with optional singleflight)
 	fetch := func() (string, error) {
+		i.stats.incApiCall()
 		base := strings.TrimRight(i.apiBase, "/")
 		apiURL := fmt.Sprintf("%s/%s", base, ipStr)
 		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, apiURL, nil)
 		if err != nil {
+			i.stats.incApiError()
 			return "", err
 		}
 		resp, err := httpClient.Do(req)
 		if err != nil {
+			i.stats.incApiError()
 			return "", err
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
+			i.stats.incApiError()
 			return "", fmt.Errorf("geojs bad status %d", resp.StatusCode)
 		}
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
+			i.stats.incApiError()
 			return "", err
 		}
 		c := strings.ToUpper(strings.TrimSpace(string(body)))
 		if len(c) != 2 {
+			i.stats.incApiError()
 			return "", fmt.Errorf("invalid country %q", c)
 		}
 		return c, nil

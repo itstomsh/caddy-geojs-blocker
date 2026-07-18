@@ -37,6 +37,10 @@ func TestCountersIncAllowBlock(t *testing.T) {
 	c.incAllow("DE")
 	c.incBlock("??")
 	c.incAllow("") // Uses "??"
+	c.incCacheHit()
+	c.incCacheHit()
+	c.incApiCall()
+	c.incApiError()
 
 	snap := c.snapshot()
 	if snap["total_allowed"].(uint64) != 2 {
@@ -51,9 +55,21 @@ func TestCountersIncAllowBlock(t *testing.T) {
 	if v, ok := snap["blocked_by_cc"].(map[string]uint64)["??"]; !ok || v != 1 {
 		t.Errorf("blocked_by_cc[??] = %d, want 1", v)
 	}
+	if snap["cache_hits"].(uint64) != 2 {
+		t.Errorf("cache_hits = %d, want 2", snap["cache_hits"])
+	}
+	if snap["api_calls"].(uint64) != 1 {
+		t.Errorf("api_calls = %d, want 1", snap["api_calls"])
+	}
+	if snap["api_errors"].(uint64) != 1 {
+		t.Errorf("api_errors = %d, want 1", snap["api_errors"])
+	}
 	c.reset()
 	if snap := c.snapshot(); snap["total_allowed"].(uint64) != 0 {
 		t.Errorf("reset failed: total_allowed = %d", snap["total_allowed"])
+	}
+	if snap := c.snapshot(); snap["cache_hits"].(uint64) != 0 || snap["api_calls"].(uint64) != 0 || snap["api_errors"].(uint64) != 0 {
+		t.Errorf("reset failed to clear cache_hits/api_calls/api_errors: %+v", snap)
 	}
 }
 
@@ -216,6 +232,52 @@ func TestFetch(t *testing.T) {
 	if totalAllowed != 1 {
 		t.Fatalf("expected total_allowed = 1 (only non-cached counted), got %d", totalAllowed)
 	}
+
+	if got := atomic.LoadUint64(&i.stats.ApiCalls); got != 1 {
+		t.Errorf("ApiCalls = %d, want 1 (only the first request should reach GeoJS)", got)
+	}
+	if got := atomic.LoadUint64(&i.stats.CacheHits); got != 1 {
+		t.Errorf("CacheHits = %d, want 1 (the second request should be served from cache)", got)
+	}
+	if got := atomic.LoadUint64(&i.stats.ApiErrors); got != 0 {
+		t.Errorf("ApiErrors = %d, want 0", got)
+	}
+}
+
+func TestFetchApiError(t *testing.T) {
+	// Mock GeoJS server that always fails, to verify ApiCalls/ApiErrors
+	// count the failed attempt (not just successful lookups).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	i := &GeoJSBlocker{
+		logger:  zap.NewNop(),
+		stats:   newCounters(),
+		apiBase: srv.URL,
+		useSF:   false,
+		allowUD: true, // lookup failure falls back to allow
+		cache:   newIPCache(10, time.Minute),
+		Allowed: []string{"DE"},
+	}
+
+	next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error { return nil })
+	r := httptest.NewRequest("GET", "http://example/", nil)
+	r.Header.Set("X-Real-IP", "1.2.3.4")
+	if err := i.ServeHTTP(httptest.NewRecorder(), r, next); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+
+	if got := atomic.LoadUint64(&i.stats.ApiCalls); got != 1 {
+		t.Errorf("ApiCalls = %d, want 1", got)
+	}
+	if got := atomic.LoadUint64(&i.stats.ApiErrors); got != 1 {
+		t.Errorf("ApiErrors = %d, want 1 (bad upstream status should count as an error)", got)
+	}
+	if got := atomic.LoadUint64(&i.stats.CacheHits); got != 0 {
+		t.Errorf("CacheHits = %d, want 0", got)
+	}
 }
 
 func TestClientIPFromRequest(t *testing.T) {
@@ -248,6 +310,10 @@ func TestCountersFileRoundTrip(t *testing.T) {
 	c.incAllow("DE")
 	c.incAllow("DE")
 	c.incBlock("US")
+	c.incCacheHit()
+	c.incApiCall()
+	c.incApiCall()
+	c.incApiError()
 
 	if err := saveCountersToFile(path, c); err != nil {
 		t.Fatalf("saveCountersToFile() error = %v", err)
@@ -268,6 +334,15 @@ func TestCountersFileRoundTrip(t *testing.T) {
 	}
 	if loaded.ByCountryBlock["US"] != 1 {
 		t.Errorf("loaded.ByCountryBlock[US] = %d, want 1", loaded.ByCountryBlock["US"])
+	}
+	if loaded.CacheHits != 1 {
+		t.Errorf("loaded.CacheHits = %d, want 1", loaded.CacheHits)
+	}
+	if loaded.ApiCalls != 2 {
+		t.Errorf("loaded.ApiCalls = %d, want 2", loaded.ApiCalls)
+	}
+	if loaded.ApiErrors != 1 {
+		t.Errorf("loaded.ApiErrors = %d, want 1", loaded.ApiErrors)
 	}
 }
 
